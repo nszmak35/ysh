@@ -39,7 +39,6 @@ int bind_count = 0;
 char history_path[512] = {0};
 
 static char *ysh_clipboard = NULL;
-
 static int selection_mark = -1;
 
 char color_mistake[64]        = "\x1b[1;31m";
@@ -525,6 +524,8 @@ void ysh_redisplay(void) {
             } else {
                 if (word[0] == '-' || is_number(word)) {
                     printf("%s", color_element_int);
+                } else {
+                    printf("%s", color_non_mistake);
                 }
             }
 
@@ -1343,6 +1344,17 @@ int main(int argc, char **argv) {
     rl_variable_bind("convert-meta", "off");
     rl_variable_bind("input-meta", "on");
     rl_variable_bind("output-meta", "on");
+
+    rl_variable_bind("completion-query-items", "0");
+    rl_variable_bind("page-completions", "off");
+
+    rl_variable_bind("show-all-if-ambiguous", "on");
+    rl_variable_bind("menu-complete-display-prefix", "on");
+    rl_variable_bind("colored-stats", "on");
+    rl_variable_bind("colored-completion-prefix", "on");
+
+    rl_bind_key('\t', rl_menu_complete);
+    rl_bind_keyseq("\\e[Z", rl_backward_menu_complete);
     
     setup_custom_navigation();
 
