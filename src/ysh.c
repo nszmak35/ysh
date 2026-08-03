@@ -1492,9 +1492,10 @@ char *command_generator(const char *text, int state) {
         }
     }
 
-    while (dir_path != NULL) {
-        if (!dir) {
+    while (dir_path != NULL || dir != NULL) {
+        if (!dir && dir_path) {
             dir = opendir(dir_path);
+            dir_path = strtok(NULL, ":");
         }
 
         if (dir) {
@@ -1509,14 +1510,25 @@ char *command_generator(const char *text, int state) {
             closedir(dir);
             dir = NULL;
         }
-        dir_path = strtok(NULL, ":");
     }
 
+    if (path_copy) { free(path_copy); path_copy = NULL; }
     return NULL;
 }
 
 char **ysh_completion(const char *text, int start, int end) {
     (void)end;
+
+    if (!text || *text == '\0') {
+        return NULL;
+    }
+
+    const char *p = text;
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (*p == '\0') {
+        return NULL;
+    }
+
     char **matches = NULL;
 
     if (start == 0) {
