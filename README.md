@@ -62,7 +62,7 @@ sudo dnf install gcc make readline-devel
 ## Build
 
 ```bash
-git clone https://github.com/nszmak/ysh.git
+git clone https://github.com/nszmak35/ysh.git
 cd ysh
 make
 sudo make install
