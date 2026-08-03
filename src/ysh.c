@@ -10,6 +10,7 @@
 #include <signal.h>
 #include <errno.h>
 #include <glob.h>
+#include <time.h>
 
 #include <readline/readline.h>
 #include <readline/history.h>
@@ -62,6 +63,8 @@ const char *builtins[] = {
     "source",
     ".",
     "notch",
+    "eval",
+    "time",
     NULL
 };
 
@@ -993,6 +996,53 @@ int execute_single_command(char *cmd_str) {
 
     int ret_val = 0;
 
+    if (strcmp(args[0], "eval") == 0) {
+        if (arg_count < 2) {
+            fprintf(stderr, "ysh: eval: usage: eval \"command\"\n");
+            ret_val = 1;
+            goto cleanup;
+        }
+        char target_cmd[1024] = {0};
+        for (int i = 1; i < arg_count; i++) {
+            strcat(target_cmd, args[i]);
+            if (i < arg_count - 1) strcat(target_cmd, " ");
+        }
+        trim_quotes(target_cmd);
+        execute_line(target_cmd);
+        ret_val = 0;
+        goto cleanup;
+    }
+
+    if (strcmp(args[0], "time") == 0) {
+        if (arg_count < 2) {
+            fprintf(stderr, "ysh: time: usage: time \"command\"\n");
+            ret_val = 1;
+            goto cleanup;
+        }
+        char target_cmd[1024] = {0};
+        for (int i = 1; i < arg_count; i++) {
+            strcat(target_cmd, args[i]);
+            if (i < arg_count - 1) strcat(target_cmd, " ");
+        }
+        trim_quotes(target_cmd);
+
+        struct timespec start, end;
+        clock_gettime(CLOCK_MONOTONIC, &start);
+
+        execute_line(target_cmd);
+
+        clock_gettime(CLOCK_MONOTONIC, &end);
+
+        double elapsed_sec = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+        int hours = (int)(elapsed_sec / 3600);
+        int minutes = (int)(((int)elapsed_sec % 3600) / 60);
+        double seconds = elapsed_sec - (hours * 3600 + minutes * 60);
+
+        printf("\nExecuted in %02dh %02dm %.3fs\n", hours, minutes, seconds);
+        ret_val = 0;
+        goto cleanup;
+    }
+
     if (strcmp(args[0], "notch") == 0) {
         ret_val = execute_notch_command(arg_count, args);
         goto cleanup;
@@ -1135,7 +1185,7 @@ int execute_single_command(char *cmd_str) {
     }
 
     if (strcmp(args[0], "help") == 0) {
-        printf("ysh - Simple C Shell\nBuilt-in: cd, exit, help, alias, export, yshbind, yshlisthistory, yshcleanhistory, yshsetlight, source, ., notch\nOperators: |, ||, &&, >, >>, <\nWildcard: *\nVariables: NAME=val, $NAME, $(cmd)\nShortcuts: Shift+Arrows (select), Ctrl+Shift+C (copy), Ctrl+Shift+V (paste)\n");
+        printf("ysh - Simple C Shell\nBuilt-in: cd, exit, help, alias, export, yshbind, yshlisthistory, yshcleanhistory, yshsetlight, source, ., notch, eval, time\nOperators: |, ||, &&, >, >>, <\nWildcard: *\nVariables: NAME=val, $NAME, $(cmd)\nShortcuts: Shift+Arrows (select), Ctrl+Shift+C (copy), Ctrl+Shift+V (paste)\n");
         ret_val = 0;
         goto cleanup;
     }
