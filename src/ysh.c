@@ -40,12 +40,14 @@ char history_path[512] = {0};
 
 static char *ysh_clipboard = NULL;
 static int selection_mark = -1;
+static char *pending_readline_input = NULL;
 
 char color_mistake[64]        = "\x1b[1;31m";
 char color_non_mistake[64]    = "\x1b[1;32m";
 char color_element_string[64] = "\x1b[1;33m";
 char color_element_int[64]    = "\x1b[1;36m";
 char color_operators[64]      = "\x1b[1;35m";
+char color_tabletcolor[64]    = "\x1b[1;35m";
 
 const char *builtins[] = {
     "cd",
@@ -59,6 +61,7 @@ const char *builtins[] = {
     "yshsetlight",
     "source",
     ".",
+    "notch",
     NULL
 };
 
@@ -69,6 +72,7 @@ void print_binds(void);
 void print_aliases(void);
 int execute_single_command(char *cmd_str);
 int handle_custom_bind(int count, int key);
+void update_ls_colors_from_tabletcolor(void);
 
 const char* parse_color_name(const char *name) {
     if (strcasecmp(name, "red") == 0)     return "\x1b[1;31m";
@@ -93,6 +97,27 @@ const char* parse_color_name(const char *name) {
     if (strcasecmp(name, "lavender") == 0)    return "\x1b[38;2;180;191;231m";
     
     return name;
+}
+
+void update_ls_colors_from_tabletcolor(void) {
+    char raw_code[32] = {0};
+    const char *p = color_tabletcolor;
+
+    if (strncmp(p, "\x1b[", 2) == 0) {
+        p += 2;
+        size_t idx = 0;
+        while (*p && *p != 'm' && idx < sizeof(raw_code) - 1) {
+            raw_code[idx++] = *p++;
+        }
+        raw_code[idx] = '\0';
+    } else {
+        strcpy(raw_code, "1;35");
+    }
+
+    char ls_buf[512];
+    snprintf(ls_buf, sizeof(ls_buf), "di=%s:fi=0:ln=%s:ex=%s:pi=%s:so=%s:bd=%s:cd=%s",
+             raw_code, raw_code, raw_code, raw_code, raw_code, raw_code, raw_code);
+    setenv("LS_COLORS", ls_buf, 1);
 }
 
 void handle_sigint(int sig) {
@@ -403,7 +428,12 @@ int is_in_path(const char *cmd) {
 
 int is_number(const char *str) {
     if (!str || *str == '\0') return 0;
-    for (int i = 0; str[i] != '\0'; i++) {
+    int i = 0;
+    if (str[0] == '-' || str[0] == '+') {
+        if (str[1] == '\0') return 0;
+        i = 1;
+    }
+    for (; str[i] != '\0'; i++) {
         if (str[i] < '0' || str[i] > '9') return 0;
     }
     return 1;
@@ -445,7 +475,16 @@ void ysh_redisplay(void) {
     }
 
     char *syntax_on = getenv("YSH_SYNTAX_LIGHTER");
-    int use_syntax = (syntax_on && strcmp(syntax_on, "1") == 0);
+    int use_syntax = (!syntax_on || strcmp(syntax_on, "0") != 0);
+
+    if (use_syntax) {
+        rl_variable_bind("colored-stats", "on");
+        rl_variable_bind("colored-completion-prefix", "on");
+        update_ls_colors_from_tabletcolor();
+    } else {
+        rl_variable_bind("colored-stats", "off");
+        rl_variable_bind("colored-completion-prefix", "off");
+    }
 
     int in_quote = 0;
     char quote_char = 0;
@@ -525,7 +564,7 @@ void ysh_redisplay(void) {
                 if (word[0] == '-' || is_number(word)) {
                     printf("%s", color_element_int);
                 } else {
-                    printf("%s", color_non_mistake);
+                    printf("\x1b[0m");
                 }
             }
 
@@ -646,6 +685,125 @@ void clean_history_cmd(void) {
     if (history_path[0] != '\0') {
         write_history(history_path);
     }
+}
+
+static int notch_recursion_depth = 0;
+
+int execute_notch_command(int arg_count, char **args) {
+    if (arg_count < 3) {
+        fprintf(stderr, "ysh: notch: invalid format\n");
+        fprintf(stderr, "Usage:\n");
+        fprintf(stderr, "  notch -s n      (substitute n-th command from start)\n");
+        fprintf(stderr, "  notch -s -n     (substitute n-th command from end)\n");
+        fprintf(stderr, "  notch -r n      (execute n-th command from start)\n");
+        fprintf(stderr, "  notch -r -n     (execute n-th command from end)\n");
+        fprintf(stderr, "  notch -t n      (print text of n-th command from start)\n");
+        fprintf(stderr, "  notch -t -n     (print text of n-th command from end)\n");
+        fprintf(stderr, "  notch -f \"cmd\"  (find exact matches)\n");
+        fprintf(stderr, "  notch -ff \"cmd\" (find substring)\n");
+        return 1;
+    }
+
+    HIST_ENTRY **the_list = history_list();
+    if (!the_list) {
+        fprintf(stderr, "ysh: notch: history is empty\n");
+        return 1;
+    }
+
+    int total = 0;
+    while (the_list[total]) total++;
+
+    if (total == 0) {
+        fprintf(stderr, "ysh: notch: history is empty\n");
+        return 1;
+    }
+
+    char *flag = args[1];
+
+    if (strcmp(flag, "-s") == 0 || strcmp(flag, "-r") == 0 || strcmp(flag, "-t") == 0) {
+        int n = atoi(args[2]);
+        if (n == 0) {
+            fprintf(stderr, "ysh: notch: error: index 0 is invalid\n");
+            return 1;
+        }
+
+        int target_index = -1;
+        if (n > 0) {
+            target_index = n - 1;
+        } else {
+            target_index = total + n;
+        }
+
+        if (target_index < 0 || target_index >= total) {
+            fprintf(stderr, "ysh: notch: index %d out of history bounds (%d elements total)\n", n, total);
+            return 1;
+        }
+
+        char *target_cmd = the_list[target_index]->line;
+
+        if (strcmp(flag, "-s") == 0) {
+            if (pending_readline_input) free(pending_readline_input);
+            pending_readline_input = strdup(target_cmd);
+        } else if (strcmp(flag, "-r") == 0) {
+            if (notch_recursion_depth >= 5) {
+                fprintf(stderr, "ysh: notch: error: recursion depth exceeded (cannot execute notch recursively)\n");
+                return 1;
+            }
+            notch_recursion_depth++;
+            execute_line(target_cmd);
+            notch_recursion_depth--;
+        } else if (strcmp(flag, "-t") == 0) {
+            printf("%s\n", target_cmd);
+        }
+        return 0;
+    }
+
+    if (strcmp(flag, "-f") == 0) {
+        char target_cmd[512] = {0};
+        for (int i = 2; i < arg_count; i++) {
+            strcat(target_cmd, args[i]);
+            if (i < arg_count - 1) strcat(target_cmd, " ");
+        }
+        trim_quotes(target_cmd);
+
+        int found = 0;
+        for (int i = 0; i < total; i++) {
+            if (strcmp(the_list[i]->line, target_cmd) == 0) {
+                printf("%d\n", i + 1);
+                found = 1;
+            }
+        }
+        if (!found) {
+            fprintf(stderr, "ysh: notch: command not found in history\n");
+            return 1;
+        }
+        return 0;
+    }
+
+    if (strcmp(flag, "-ff") == 0) {
+        char target_sub[512] = {0};
+        for (int i = 2; i < arg_count; i++) {
+            strcat(target_sub, args[i]);
+            if (i < arg_count - 1) strcat(target_sub, " ");
+        }
+        trim_quotes(target_sub);
+
+        int found = 0;
+        for (int i = 0; i < total; i++) {
+            if (strstr(the_list[i]->line, target_sub) != NULL) {
+                printf("%5d  %s\n", i + 1, the_list[i]->line);
+                found = 1;
+            }
+        }
+        if (!found) {
+            fprintf(stderr, "ysh: notch: no matches found\n");
+            return 1;
+        }
+        return 0;
+    }
+
+    fprintf(stderr, "ysh: notch: unknown flag '%s'\n", flag);
+    return 1;
 }
 
 int execute_source_command(const char *filename) {
@@ -835,6 +993,11 @@ int execute_single_command(char *cmd_str) {
 
     int ret_val = 0;
 
+    if (strcmp(args[0], "notch") == 0) {
+        ret_val = execute_notch_command(arg_count, args);
+        goto cleanup;
+    }
+
     if (strcmp(args[0], "source") == 0 || strcmp(args[0], ".") == 0) {
         ret_val = execute_source_command(args[1]);
         goto cleanup;
@@ -862,6 +1025,9 @@ int execute_single_command(char *cmd_str) {
             strncpy(color_element_int, parsed, sizeof(color_element_int) - 1);
         } else if (strcmp(target, "operators") == 0) {
             strncpy(color_operators, parsed, sizeof(color_operators) - 1);
+        } else if (strcmp(target, "tabletcolor") == 0 || strcmp(target, "tablet_color") == 0) {
+            strncpy(color_tabletcolor, parsed, sizeof(color_tabletcolor) - 1);
+            update_ls_colors_from_tabletcolor();
         } else {
             fprintf(stderr, "ysh: yshsetlight: unknown target element '%s'\n", target);
             ret_val = 1;
@@ -969,7 +1135,7 @@ int execute_single_command(char *cmd_str) {
     }
 
     if (strcmp(args[0], "help") == 0) {
-        printf("ysh - Simple C Shell\nBuilt-in: cd, exit, help, alias, export, yshbind, yshlisthistory, yshcleanhistory, yshsetlight, source, .\nOperators: |, ||, &&, >, >>, <\nWildcard: *\nVariables: NAME=val, $NAME, $(cmd)\nShortcuts: Shift+Arrows (select), Ctrl+Shift+C (copy), Ctrl+Shift+V (paste)\n");
+        printf("ysh - Simple C Shell\nBuilt-in: cd, exit, help, alias, export, yshbind, yshlisthistory, yshcleanhistory, yshsetlight, source, ., notch\nOperators: |, ||, &&, >, >>, <\nWildcard: *\nVariables: NAME=val, $NAME, $(cmd)\nShortcuts: Shift+Arrows (select), Ctrl+Shift+C (copy), Ctrl+Shift+V (paste)\n");
         ret_val = 0;
         goto cleanup;
     }
@@ -1310,6 +1476,18 @@ char **ysh_completion(const char *text, int start, int end) {
     return matches;
 }
 
+int inject_pending_input(void) {
+    if (pending_readline_input) {
+        rl_insert_text(pending_readline_input);
+        rl_point = rl_end;
+        rl_redisplay();
+        free(pending_readline_input);
+        pending_readline_input = NULL;
+    }
+    rl_pre_input_hook = NULL;
+    return 0;
+}
+
 int run_script_file(const char *filename, int argc, char **argv) {
     FILE *file = fopen(filename, "r");
     if (!file) {
@@ -1362,6 +1540,7 @@ int main(int argc, char **argv) {
     rl_redisplay_function = ysh_redisplay;
 
     init_history();
+    update_ls_colors_from_tabletcolor();
 
     load_yshrc();
 
@@ -1376,6 +1555,11 @@ int main(int argc, char **argv) {
         build_prompt(prompt, sizeof(prompt));
 
         selection_mark = -1;
+
+        if (pending_readline_input != NULL) {
+            rl_pre_input_hook = inject_pending_input;
+        }
+
         input = readline(prompt);
 
         if (!input) {
@@ -1398,5 +1582,6 @@ int main(int argc, char **argv) {
     }
 
     if (ysh_clipboard) free(ysh_clipboard);
+    if (pending_readline_input) free(pending_readline_input);
     return 0;
 }
